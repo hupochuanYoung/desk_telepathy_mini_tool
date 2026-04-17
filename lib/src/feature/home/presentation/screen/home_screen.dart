@@ -83,11 +83,10 @@ class _HomePageState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _connectMqtt() async {
+    // 连接成功后，service 会自动用 _myStatus(默认 online) 做一次 retained 广播
+    // + 发一条 hello，让对端回传自己的状态，详见 MqttService._onLinkUp()
     final ok = await _mqtt.connect();
     setState(() => _connected = ok);
-
-    // 上线后广播自己的状态
-    if (ok) _mqtt.sendStatus(_myStatus.name);
 
     _connSub = _mqtt.connectionStream.listen((connected) {
       if (mounted) setState(() => _connected = connected);
@@ -105,10 +104,16 @@ class _HomePageState extends State<HomeScreen> with TickerProviderStateMixin {
           _playReceivedAnimation(action);
         }
       case MsgType.status:
-        setState(() => _peerStatus = PeerStatus.fromCode(msg.data));
+        if (mounted) setState(() => _peerStatus = PeerStatus.fromCode(msg.data));
       case MsgType.ambient:
         // 对方发来的氛围同步
         _applyAmbient(msg.data);
+      case MsgType.hello:
+        // service 层已自动回传自己的 status，这里无需额外处理；
+        // 同时把对端视为在线（若还没收到他的 status 广播）
+        if (mounted && _peerStatus == PeerStatus.offline) {
+          setState(() => _peerStatus = PeerStatus.online);
+        }
     }
   }
 
