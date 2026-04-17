@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:desk_telepathy/src/core/config/env.dart';
 import 'package:desk_telepathy/src/core/service/interaction_store.dart';
 import 'package:desk_telepathy/src/core/service/mqtt_service.dart';
 import 'package:desk_telepathy/src/core/utils/platform_utils.dart';
@@ -42,8 +43,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomeScreen> with TickerProviderStateMixin {
-  // TODO: 替换成你自己的巴法云私钥
-  final MqttService _mqtt = MqttService(uid: 'f34cdcba512e497d8ec43fafefd0304f', topic: 'desktop0001');
+  final MqttService _mqtt = MqttService(uid: Env.bemfaUid, topic: Env.bemfaTopic);
   final InteractionStore _store = InteractionStore();
 
   StreamSubscription<TelepathyMessage>? _msgSub;

@@ -1,5 +1,6 @@
 import 'dart:ui';
 
+import 'package:desk_telepathy/src/core/config/env.dart';
 import 'package:desk_telepathy/src/core/utils/platform_utils.dart';
 import 'package:desk_telepathy/src/feature/home/presentation/screen/home_screen.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +11,7 @@ const _margin = 20.0; // 距离屏幕边缘
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Env.load();
 
   if (isDesktop) {
     await windowManager.ensureInitialized();
