@@ -3,14 +3,18 @@ import 'dart:convert';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import '../utils/platform_utils.dart';
+import 'app_logger.dart';
+
+const _tag = 'MQTT';
 
 /// 消息类型
 ///
-/// - [action]  一次性互动（knock / heart / ...）
-/// - [status]  我的在线状态（online / busy / focus / offline），**retained**
-/// - [ambient] 氛围同步
-/// - [hello]   上线通知，对端收到后应回传自己的 status
-enum MsgType { action, status, ambient, hello }
+/// - [action]   一次性互动（knock / heart / ...）
+/// - [status]   我的在线状态（online / busy / focus / offline），**retained**
+/// - [ambient]  氛围同步
+/// - [hello]    上线通知，对端收到后应回传自己的 status / location
+/// - [location] 地理位置（城市级 JSON），**retained**
+enum MsgType { action, status, ambient, hello, location }
 
 /// MQTT 消息体
 class TelepathyMessage {
@@ -69,12 +73,15 @@ class MqttService {
   /// 记住本端最新的状态，用于重连后重播 / 响应 hello
   String _myStatus = 'online';
 
+  /// 记住本端最新的位置 JSON；重连 / 响应 hello 时重发
+  String? _myLocation;
+
   MqttService({required this.uid, this.topic = 'desktop0001'});
 
   Future<bool> connect() async {
     // 获取设备唯一标识
     _deviceId = await DeviceId.get();
-    print('[MQTT] 设备标识: $_deviceId');
+    AppLogger.i(_tag, '设备标识: $_deviceId');
 
     client = MqttServerClient('bemfa.com', uid);
     client.port = 9501;
@@ -97,23 +104,23 @@ class MqttService {
         .startClean();
 
     client.onAutoReconnect = () {
-      print('[MQTT] 正在重连...');
+      AppLogger.w(_tag, '正在重连...');
       _setConnected(false);
     };
     client.onAutoReconnected = () {
-      print('[MQTT] 重连成功');
+      AppLogger.i(_tag, '重连成功');
       _setConnected(true);
       _onLinkUp();
     };
     client.onDisconnected = () {
-      print('[MQTT] 已断开');
+      AppLogger.w(_tag, '已断开');
       _setConnected(false);
     };
 
     try {
       await client.connect();
       if (client.connectionStatus?.state == MqttConnectionState.connected) {
-        print('[MQTT] 连接成功！topic: $topic');
+        AppLogger.i(_tag, '连接成功 topic=$topic');
         _setConnected(true);
         client.subscribe(topic, MqttQos.atMostOnce);
 
@@ -124,11 +131,13 @@ class MqttService {
           if (msg == null) return;
           // 过滤掉自己设备发的消息（retained 的 LWT 也会被过滤）
           if (msg.from == _deviceId) return;
-          print('[MQTT] 收到 ${msg.from} 的消息: $payload');
+          AppLogger.d(_tag, '收到 ${msg.from}: ${msg.type.name}=${msg.data}');
 
-          // 收到对端的 hello：立刻回传自己最新的 status，帮助对端脱离 offline 态
+          // 收到对端的 hello：立刻回传自己最新的 status + location，帮助对端脱离未知态
           if (msg.type == MsgType.hello) {
             sendStatus(_myStatus);
+            final loc = _myLocation;
+            if (loc != null) send(TelepathyMessage(type: MsgType.location, data: loc), retain: true);
           }
 
           _msgController.add(msg);
@@ -138,17 +147,19 @@ class MqttService {
         return true;
       }
     } catch (e) {
-      print('[MQTT] 连接失败: $e');
+      AppLogger.e(_tag, '连接失败: $e');
     }
     _setConnected(false);
     return false;
   }
 
   /// 连接建立 / 自动重连成功后的握手：
-  /// 1. retained 发一次自己的状态 —— 让未来的订阅者立刻拿到
-  /// 2. 广播 hello —— 让当前在线的对端主动回传自己的状态
+  /// 1. retained 发一次自己的状态 & 位置 —— 让未来的订阅者立刻拿到
+  /// 2. 广播 hello —— 让当前在线的对端主动回传他们的状态 / 位置
   void _onLinkUp() {
     sendStatus(_myStatus);
+    final loc = _myLocation;
+    if (loc != null) send(TelepathyMessage(type: MsgType.location, data: loc), retain: true);
     send(TelepathyMessage(type: MsgType.hello, data: ''));
   }
 
@@ -163,7 +174,7 @@ class MqttService {
     final encoded = msg.encode(_deviceId);
     builder.addString(encoded);
     client.publishMessage(topic, MqttQos.atMostOnce, builder.payload!, retain: retain);
-    print('[MQTT] 发送${retain ? '(retained)' : ''}: $encoded');
+    AppLogger.d(_tag, '发送${retain ? '(retained)' : ''}: ${msg.type.name}=${msg.data}');
   }
 
   void sendAction(String action) => send(TelepathyMessage(type: MsgType.action, data: action));
@@ -175,6 +186,13 @@ class MqttService {
   }
 
   void sendAmbient(String ambient) => send(TelepathyMessage(type: MsgType.ambient, data: ambient));
+
+  /// 地理位置用 retained 发布：晚上线的对端订阅后也能立刻看到。
+  /// 传空串等价于清空（下次订阅者不会拿到历史位置）。
+  void sendLocation(String json) {
+    _myLocation = json.isEmpty ? null : json;
+    send(TelepathyMessage(type: MsgType.location, data: json), retain: true);
+  }
 
   void dispose() {
     // 优雅退出：retained 写一条 offline，覆盖之前的 online retained。

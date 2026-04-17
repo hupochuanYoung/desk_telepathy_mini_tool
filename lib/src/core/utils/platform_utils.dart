@@ -40,7 +40,7 @@ class DeviceId {
   }
 
   /// 先把常见的智能标点换成 ASCII 近似，再去掉所有非 ASCII 字符。
-  /// 如果清理后字符串为空（例如全中文），回退到 "device-<hash>"，
+  /// 如果清理后字符串为空（例如全中文），回退到 `device-{hash}`，
   /// 保证始终返回一个稳定、可在 MQTT 传输的标识。
   static String _toAscii(String raw) {
     const smartToPlain = {
