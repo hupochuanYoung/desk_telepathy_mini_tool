@@ -102,6 +102,11 @@ class HomeProvider extends ChangeNotifier {
 
   Timer? _peerLocationTimer;
   static const Duration _peerLocTimeout = Duration(seconds: 6);
+  Timer? _heartbeatTimer;
+  Timer? _peerAliveWatchdogTimer;
+  DateTime? _peerLastSeenAt;
+  static const Duration _heartbeatInterval = Duration(seconds: 10);
+  static const Duration _peerOfflineTimeout = Duration(seconds: 35);
 
   // ───────── 互动视觉 ─────────
   double _heatIntensity = 0.0;
@@ -173,17 +178,24 @@ class HomeProvider extends ChangeNotifier {
     final ok = await _mqtt.connect();
     if (ok) _connectedSince = DateTime.now();
     _connected = ok;
-    if (ok) _sendHelloFlowOnConnect();
+    if (ok) {
+      _sendHelloFlowOnConnect();
+      _startHeartbeat();
+      _startPeerAliveWatchdog();
+    }
     _safeNotify();
     _msgSub = _mqtt.messages.listen(_handleMessage);
   }
 
   void _handleMessage(TelepathyMessage msg) {
+    _peerLastSeenAt = DateTime.now();
     // 先判回声 —— 自己刚发的 action 被 broker 回放，静默吞掉
     if (msg.type == MsgType.action && _isSelfEcho(msg.data)) return;
 
-    // 对方只要来了任何一条消息，都拉满活跃度
-    if (!_peerBumpController.isClosed) _peerBumpController.add(null);
+    // 心跳只用于保活，不驱动视觉活跃度；其他消息照常拉满活跃度
+    if (msg.type != MsgType.ping && !_peerBumpController.isClosed) {
+      _peerBumpController.add(null);
+    }
 
     switch (msg.type) {
       case MsgType.action:
@@ -230,6 +242,13 @@ class HomeProvider extends ChangeNotifier {
           _safeNotify();
           // 仅在对方首次上线时回一次，避免 hello 循环回声
           _replyMyPresence();
+        }
+      case MsgType.ping:
+        // 纯保活包：只更新时间戳。若此前判离线，收到心跳即恢复在线。
+        if (_peerStatus == PeerStatus.offline) {
+          _peerStatus = PeerStatus.online;
+          _onPeerStatusChanged(wasOffline: true, next: PeerStatus.online);
+          _safeNotify();
         }
       case MsgType.vase:
         break;
@@ -278,6 +297,29 @@ class HomeProvider extends ChangeNotifier {
     if (!_connected) return;
     _mqtt.sendStatus(_myStatus.name);
     _mqtt.send(TelepathyMessage(type: MsgType.hello, data: _buildHelloPayload()));
+  }
+
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
+      if (!_connected || !_mqtt.isConnected) return;
+      _mqtt.send(TelepathyMessage(type: MsgType.ping, data: ''));
+    });
+  }
+
+  void _startPeerAliveWatchdog() {
+    _peerAliveWatchdogTimer?.cancel();
+    _peerAliveWatchdogTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      final lastSeen = _peerLastSeenAt;
+      if (lastSeen == null) return;
+      if (DateTime.now().difference(lastSeen) <= _peerOfflineTimeout) return;
+      if (_peerStatus == PeerStatus.offline) return;
+      AppLogger.w('Presence', '超过 ${_peerOfflineTimeout.inSeconds}s 未收到对方消息，判定离线');
+      _peerStatus = PeerStatus.offline;
+      _peerLocation = null;
+      _peerLocationTimer?.cancel();
+      _safeNotify();
+    });
   }
 
   /// hello 里直接携带地址信息，便于对端一跳拿到位置；
@@ -418,6 +460,8 @@ class HomeProvider extends ChangeNotifier {
     _msgSub?.cancel();
     _greetingTimer?.cancel();
     _peerLocationTimer?.cancel();
+    _heartbeatTimer?.cancel();
+    _peerAliveWatchdogTimer?.cancel();
     _receivedActionController.close();
     _peerBumpController.close();
     _mqtt.dispose();

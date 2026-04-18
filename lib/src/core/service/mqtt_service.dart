@@ -13,10 +13,11 @@ const _tag = 'MQTT';
 /// - [status]   我的在线状态（online / busy / focus / offline），**retained**
 /// - [ambient]  氛围同步
 /// - [hello]    上线通知，对端收到后应回传自己的 status；并在 data 中携带地址 JSON
+/// - [ping]     心跳包（非 retained），用于无后端场景下的在线保活判断
 /// - [vase]     共享花瓶事件（追加 / 全量快照）。data 是一段 JSON：
 ///              `{"op":"add","item":{...}}` 非 retained，广播一次；
 ///              `{"op":"snap","items":[...]}` **retained**，晚上线方用它初始化。
-enum MsgType { action, status, ambient, hello, vase }
+enum MsgType { action, status, ambient, hello, ping, vase }
 
 /// MQTT 消息体
 class TelepathyMessage {
