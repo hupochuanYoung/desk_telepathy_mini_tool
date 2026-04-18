@@ -68,22 +68,9 @@ class MqttService {
 
   Stream<TelepathyMessage> get messages => _msgController.stream;
 
-  final _connectionController = StreamController<bool>.broadcast();
-
-  Stream<bool> get connectionStream => _connectionController.stream;
-
   bool _isConnected = false;
 
   bool get isConnected => _isConnected;
-
-  /// 记住本端最新的状态，用于重连后重播 / 响应 hello
-  String _myStatus = 'online';
-
-  /// 记住本端最新的位置 JSON；重连 / 响应 hello 时重发
-  String? _myLocation;
-
-  /// 记住本端最新的花瓶快照（JSON 字符串）；重连后重发 retained，保证两端同步
-  String? _myVaseSnapshot;
 
   MqttService({required this.uid, this.topic = 'desktop0001'});
 
@@ -119,7 +106,6 @@ class MqttService {
     client.onAutoReconnected = () {
       AppLogger.i(_tag, '重连成功');
       _setConnected(true);
-      _onLinkUp();
     };
     client.onDisconnected = () {
       AppLogger.w(_tag, '已断开');
@@ -147,20 +133,10 @@ class MqttService {
             if (msg.from == _deviceId) continue;
             AppLogger.d(_tag, '收到 ${msg.from}: ${msg.type.name}=${msg.data}');
 
-            // 收到对端的 hello：立刻回传自己最新的 status + location，帮助对端脱离未知态
-            if (msg.type == MsgType.hello) {
-              sendStatus(_myStatus);
-              final loc = _myLocation;
-              if (loc != null) {
-                send(TelepathyMessage(type: MsgType.location, data: loc), retain: true);
-              }
-            }
-
             _msgController.add(msg);
           }
         });
 
-        _onLinkUp();
         return true;
       }
     } catch (e) {
@@ -170,48 +146,41 @@ class MqttService {
     return false;
   }
 
-  /// 连接建立 / 自动重连成功后的握手：
-  /// 1. retained 发一次自己的状态 & 位置 —— 让未来的订阅者立刻拿到
-  /// 2. 广播 hello —— 让当前在线的对端主动回传他们的状态 / 位置
-  void _onLinkUp() {
-    sendStatus(_myStatus);
-    final loc = _myLocation;
-    if (loc != null) send(TelepathyMessage(type: MsgType.location, data: loc), retain: true);
-    final vase = _myVaseSnapshot;
-    if (vase != null) send(TelepathyMessage(type: MsgType.vase, data: vase), retain: true);
-    send(TelepathyMessage(type: MsgType.hello, data: ''));
-  }
-
   void _setConnected(bool value) {
     _isConnected = value;
-    _connectionController.add(value);
   }
 
-  void send(TelepathyMessage msg, {bool retain = false}) {
+  void send(
+    TelepathyMessage msg, {
+    bool retain = false,
+    MqttQos qos = MqttQos.atMostOnce,
+  }) {
     if (!_isConnected) return;
     final builder = MqttClientPayloadBuilder();
     final encoded = msg.encode(_deviceId);
     builder.addString(encoded);
-    client.publishMessage(topic, MqttQos.atMostOnce, builder.payload!, retain: retain);
+    client.publishMessage(topic, qos, builder.payload!, retain: retain);
     AppLogger.d(_tag, '发送${retain ? '(retained)' : ''}: ${msg.type.name}=${msg.data}');
   }
 
   void sendAction(String action) => send(TelepathyMessage(type: MsgType.action, data: action));
 
   /// 状态用 retained 发布，保证晚加入的订阅者立刻拿到我们的在线状态。
-  void sendStatus(String status) {
-    _myStatus = status;
-    send(TelepathyMessage(type: MsgType.status, data: status), retain: true);
-  }
+  void sendStatus(String status) => send(
+    TelepathyMessage(type: MsgType.status, data: status),
+    retain: true,
+    qos: MqttQos.atLeastOnce,
+  );
 
   void sendAmbient(String ambient) => send(TelepathyMessage(type: MsgType.ambient, data: ambient));
 
   /// 地理位置用 retained 发布：晚上线的对端订阅后也能立刻看到。
   /// 传空串等价于清空（下次订阅者不会拿到历史位置）。
-  void sendLocation(String json) {
-    _myLocation = json.isEmpty ? null : json;
-    send(TelepathyMessage(type: MsgType.location, data: json), retain: true);
-  }
+  void sendLocation(String json) => send(
+    TelepathyMessage(type: MsgType.location, data: json),
+    retain: true,
+    qos: MqttQos.atLeastOnce,
+  );
 
   /// 花瓶：追加一个物品（非 retained，一次性广播）。
   /// 调用前通常已在本地 state 里加入并重新发了一次 [sendVaseSnapshot]。
@@ -223,13 +192,12 @@ class MqttService {
   /// 花瓶：全量快照（retained，覆盖历史）。晚上线的一方会从这里读到当前状态。
   void sendVaseSnapshot(List<Map<String, dynamic>> items) {
     final payload = jsonEncode({'op': 'snap', 'items': items});
-    _myVaseSnapshot = payload;
     send(TelepathyMessage(type: MsgType.vase, data: payload), retain: true);
   }
 
   void dispose() {
-    // 优雅退出：retained 写一条 offline，覆盖之前的 online retained。
-    // 否则对端再次上线时会读到旧的 online，以为我们还活着。
+    // 注意：LWT 只在“非优雅断开”才会由 broker 代发。
+    // 对于主动关闭 app，这里显式发 retained offline（QoS1）保证对端尽快感知。
     if (_isConnected) {
       try {
         sendStatus('offline');
@@ -237,6 +205,5 @@ class MqttService {
     }
     client.disconnect();
     _msgController.close();
-    _connectionController.close();
   }
 }

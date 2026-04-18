@@ -12,6 +12,8 @@ import '../widgets/flower_bloom.dart';
 import '../widgets/particle_background.dart';
 import '../widgets/status_indicator.dart';
 
+const _presenceTag = 'Presence';
+
 /// 丢花互动：每种互动对应一种花，点击即向对方"丢"一朵过去
 enum TelepathyAction {
   tulip('tulip', '丢郁金香', FlowerKind.tulip, ParticleType.hearts),
@@ -62,7 +64,6 @@ class HomeProvider extends ChangeNotifier {
   InteractionStore get store => _store;
 
   StreamSubscription<TelepathyMessage>? _msgSub;
-  StreamSubscription<bool>? _connSub;
 
   // ───────── 连接 / 状态 ─────────
   bool _connected = false;
@@ -98,15 +99,7 @@ class HomeProvider extends ChangeNotifier {
 
   LocationInfo? get focalLocation => _focalLocation;
 
-
-
-  /// 对方位置"定位中…"是否应当继续展示。
-  /// 之前的 bug 是只要对方在线 + [_peerLocation] 为 null 就永远转圈 ——
-  /// 改为：对方变在线时起 [_peerLocTimeout] 的窗口，窗口内才显示 loading，
-  /// 之后若仍未收到 location，则直接显示"—"，不再让 UI 一直卡在等待态。
   Timer? _peerLocationTimer;
-
-
   static const Duration _peerLocTimeout = Duration(seconds: 6);
 
   // ───────── 互动视觉 ─────────
@@ -173,21 +166,14 @@ class HomeProvider extends ChangeNotifier {
     // 首次拿到自己的坐标时给地球一个默认焦点，避免它一直对着 (0,0)
     _focalLocation ??= info;
     _safeNotify();
-    _mqtt.sendLocation(info.encode());
   }
 
   Future<void> _connectMqtt() async {
     final ok = await _mqtt.connect();
     if (ok) _connectedSince = DateTime.now();
     _connected = ok;
+    if (ok) _sendHelloFlowOnConnect();
     _safeNotify();
-
-    _connSub = _mqtt.connectionStream.listen((c) {
-      if (c) _connectedSince = DateTime.now();
-      _connected = c;
-      _safeNotify();
-    });
-
     _msgSub = _mqtt.messages.listen(_handleMessage);
   }
 
@@ -230,17 +216,23 @@ class HomeProvider extends ChangeNotifier {
         _applyAmbient(msg.data);
       case MsgType.hello:
         final wasOffline = _peerStatus == PeerStatus.offline;
+        AppLogger.d(_presenceTag, '收到 hello: ${msg.data}');
         if (wasOffline) {
           _peerStatus = PeerStatus.online;
           _onPeerStatusChanged(wasOffline: true, next: PeerStatus.online);
           _safeNotify();
         }
+        // 对方 hello 后立即回传自己的当前状态 + 位置（不发花，避免互相连锁刷屏）
+        _replyMyPresence();
       case MsgType.location:
         final loc = LocationInfo.decode(msg.data);
         if (loc != null) {
           _peerLocation = loc;
           _peerLocationTimer?.cancel();
+          AppLogger.i('Location', '收到对方位置: ${loc.display}');
           _safeNotify();
+        } else {
+          AppLogger.w('Location', '收到 location 但解析失败: ${msg.data}');
         }
       case MsgType.vase:
         break;
@@ -266,20 +258,39 @@ class HomeProvider extends ChangeNotifier {
       });
     }
 
-    if (wasOffline) _onPeerCameOnline();
+    if (wasOffline) _showPeerOnlineGreeting();
   }
 
-  /// 对方从离线切到在线时的一整套握手动作：
-  /// 1) retained 再发一次自己的位置 —— 对方若冷启动订阅时还没收到，也能补上
-  /// 2) 发一条 hello —— 请对方回传状态 / 位置（他们的 location 可能刚好没发）
-  /// 3) 非冷启动才播欢迎横幅 + 主动丢一朵雏菊；冷启动时只做握手、不刷屏。
-  void _onPeerCameOnline() {
-    // 握手：位置永远要给对方一份，不受冷启动窗口限制
-    _sendMyLocationIfAvailable();
-    if (_connected) {
-      _mqtt.send(TelepathyMessage(type: MsgType.hello, data: ''));
-    }
+  /// 本端连上 MQTT（首次 / 自动重连）后的固定握手：
+  /// - 发 hello
+  /// - 发自己当前 status
+  /// - 发自己位置（若已拿到）
+  /// - 主动送一朵雏菊（即使对方当下不在线，broker 也会正常处理当前消息）
+  void _sendHelloFlowOnConnect() {
+    if (!_connected) return;
+    _mqtt.send(TelepathyMessage(type: MsgType.hello, data: 'hi'));
+    _mqtt.sendStatus(_myStatus.name);
+    final mine = _myLocation;
+    if (mine != null) _mqtt.sendLocation(mine.encode());
+    _mqtt.sendAction(TelepathyAction.daisy.code);
+    _store.recordSent(TelepathyAction.daisy.code);
+    _markSelfSend(TelepathyAction.daisy.code);
+  }
 
+  /// 响应对方 hello：回传我当前状态和位置，不发 action，避免双端回声升级。
+  void _replyMyPresence() {
+    if (!_connected) return;
+    _mqtt.sendStatus(_myStatus.name);
+    final mine = _myLocation;
+    if (mine != null) {
+      _mqtt.sendLocation(mine.encode());
+    } else {
+      AppLogger.w('Location', '回复 hello 时本端位置为空，稍后拿到位置会自动补发');
+    }
+  }
+
+  /// 对方从离线切到在线时，仅做 UI 提示，不再承担网络握手职责。
+  void _showPeerOnlineGreeting() {
     final since = _connectedSince;
     final isColdStart =
         since != null && DateTime.now().difference(since).inMilliseconds < 3000;
@@ -299,22 +310,6 @@ class HomeProvider extends ChangeNotifier {
       _greeting = null;
       _safeNotify();
     });
-
-    // 主动送一朵雏菊作为"打招呼"
-    if (_connected) {
-      _mqtt.sendAction(TelepathyAction.daisy.code);
-      _store.recordSent(TelepathyAction.daisy.code);
-      _markSelfSend(TelepathyAction.daisy.code);
-    }
-  }
-
-  /// 把本端最新的位置再 retained 广播一次。
-  /// [_fetchLocation] 可能还没完成（首启慢网）—— 那就跳过，
-  /// 一旦有结果它会自己补发，不会漏给对方。
-  void _sendMyLocationIfAvailable() {
-    final mine = _myLocation;
-    if (mine == null || !_connected) return;
-    _mqtt.sendLocation(mine.encode());
   }
 
   void _applyAmbient(String data) {
@@ -399,7 +394,6 @@ class HomeProvider extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _msgSub?.cancel();
-    _connSub?.cancel();
     _greetingTimer?.cancel();
     _peerLocationTimer?.cancel();
     _receivedActionController.close();
