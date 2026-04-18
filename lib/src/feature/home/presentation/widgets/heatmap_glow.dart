@@ -11,10 +11,10 @@ class HeatmapGlow extends StatelessWidget {
   Widget build(BuildContext context) {
     if (intensity <= 0) return const SizedBox.shrink();
 
-    // 根据强度插值颜色：冷蓝 → 暖紫 → 热粉
+    // 根据强度插值颜色：冷青 → 冷紫（避开俗气的粉色）
     final color = Color.lerp(
-      const Color(0xFF3B82F6), // 蓝
-      const Color(0xFFEC4899), // 粉
+      const Color(0xFF06B6D4), // cyan-500
+      const Color(0xFFA78BFA), // violet-400
       intensity,
     )!;
 

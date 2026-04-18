@@ -9,12 +9,15 @@ const _tag = 'MQTT';
 
 /// 消息类型
 ///
-/// - [action]   一次性互动（knock / heart / ...）
+/// - [action]   一次性丢花互动（tulip / daisy / lily / rose / sunflower）
 /// - [status]   我的在线状态（online / busy / focus / offline），**retained**
 /// - [ambient]  氛围同步
 /// - [hello]    上线通知，对端收到后应回传自己的 status / location
 /// - [location] 地理位置（城市级 JSON），**retained**
-enum MsgType { action, status, ambient, hello, location }
+/// - [vase]     共享花瓶事件（追加 / 全量快照）。data 是一段 JSON：
+///              `{"op":"add","item":{...}}` 非 retained，广播一次；
+///              `{"op":"snap","items":[...]}` **retained**，晚上线方用它初始化。
+enum MsgType { action, status, ambient, hello, location, vase }
 
 /// MQTT 消息体
 class TelepathyMessage {
@@ -75,6 +78,9 @@ class MqttService {
 
   /// 记住本端最新的位置 JSON；重连 / 响应 hello 时重发
   String? _myLocation;
+
+  /// 记住本端最新的花瓶快照（JSON 字符串）；重连后重发 retained，保证两端同步
+  String? _myVaseSnapshot;
 
   MqttService({required this.uid, this.topic = 'desktop0001'});
 
@@ -160,6 +166,8 @@ class MqttService {
     sendStatus(_myStatus);
     final loc = _myLocation;
     if (loc != null) send(TelepathyMessage(type: MsgType.location, data: loc), retain: true);
+    final vase = _myVaseSnapshot;
+    if (vase != null) send(TelepathyMessage(type: MsgType.vase, data: vase), retain: true);
     send(TelepathyMessage(type: MsgType.hello, data: ''));
   }
 
@@ -192,6 +200,20 @@ class MqttService {
   void sendLocation(String json) {
     _myLocation = json.isEmpty ? null : json;
     send(TelepathyMessage(type: MsgType.location, data: json), retain: true);
+  }
+
+  /// 花瓶：追加一个物品（非 retained，一次性广播）。
+  /// 调用前通常已在本地 state 里加入并重新发了一次 [sendVaseSnapshot]。
+  void sendVaseAdd(String itemJson) {
+    final payload = jsonEncode({'op': 'add', 'item': jsonDecode(itemJson)});
+    send(TelepathyMessage(type: MsgType.vase, data: payload));
+  }
+
+  /// 花瓶：全量快照（retained，覆盖历史）。晚上线的一方会从这里读到当前状态。
+  void sendVaseSnapshot(List<Map<String, dynamic>> items) {
+    final payload = jsonEncode({'op': 'snap', 'items': items});
+    _myVaseSnapshot = payload;
+    send(TelepathyMessage(type: MsgType.vase, data: payload), retain: true);
   }
 
   void dispose() {
