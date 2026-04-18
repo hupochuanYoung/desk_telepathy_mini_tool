@@ -22,6 +22,7 @@ class InterferenceGlobe extends StatefulWidget {
     this.primary = const Color(0xFF67E8F9), // cyan-300
     this.secondary = const Color(0xFFA78BFA), // violet-400
     this.size = 130,
+    this.onManualRotate,
   });
 
   final LocationInfo? focal;
@@ -30,6 +31,10 @@ class InterferenceGlobe extends StatefulWidget {
   final Color primary;
   final Color secondary;
   final double size;
+
+  /// 用户手指开始拖动球体时触发 —— 宿主可以据此清除 focal，
+  /// 避免"刚转过去又被自动拽回某个城市"。
+  final VoidCallback? onManualRotate;
 
   @override
   State<InterferenceGlobe> createState() => _InterferenceGlobeState();
@@ -53,6 +58,9 @@ class _InterferenceGlobeState extends State<InterferenceGlobe>
   // 焦点处扩散的水滴波纹
   final List<Duration> _ripples = [];
   int? _lastRippleTrigger;
+
+  /// 用户手势拖动时，停用自动 tween，直接对 _lat/_lon 做增量
+  bool _dragging = false;
 
   @override
   void initState() {
@@ -125,13 +133,15 @@ class _InterferenceGlobeState extends State<InterferenceGlobe>
     // 缓慢脉冲（焦点标记的呼吸）
     _pulsePhase += dt * 0.6;
 
-    // 旋转 tween
-    final elapsed = (_now - _tweenStart).inMicroseconds.toDouble();
-    final total = _tweenDur.inMicroseconds.toDouble();
-    final t = total <= 0 ? 1.0 : (elapsed / total).clamp(0.0, 1.0);
-    final eased = Curves.easeInOutCubic.transform(t);
-    _lat = _fromLat + (_toLat - _fromLat) * eased;
-    _lon = _fromLon + (_toLon - _fromLon) * eased;
+    // 拖动期间禁用 tween —— _lat/_lon 由 onPanUpdate 直接改写
+    if (!_dragging) {
+      final elapsed = (_now - _tweenStart).inMicroseconds.toDouble();
+      final total = _tweenDur.inMicroseconds.toDouble();
+      final t = total <= 0 ? 1.0 : (elapsed / total).clamp(0.0, 1.0);
+      final eased = Curves.easeInOutCubic.transform(t);
+      _lat = _fromLat + (_toLat - _fromLat) * eased;
+      _lon = _fromLon + (_toLon - _fromLon) * eased;
+    }
 
     // 老化水滴波纹
     _ripples.removeWhere(
@@ -139,6 +149,37 @@ class _InterferenceGlobeState extends State<InterferenceGlobe>
     );
 
     setState(() {});
+  }
+
+  // ─── 手势旋转 ─────────────────────────────────────────
+  void _onPanStart(DragStartDetails _) {
+    _dragging = true;
+    // 锁定 tween 当前位置 —— 松手后若 focal 不变，不会莫名回弹
+    _fromLat = _toLat = _lat;
+    _fromLon = _toLon = _lon;
+    widget.onManualRotate?.call();
+  }
+
+  void _onPanUpdate(DragUpdateDetails details) {
+    final r = widget.size / 2;
+    if (r <= 0) return;
+    // 像素 → 弧度：拖过一整个半径 ≈ 旋转 90°，感觉最顺手
+    final k = (math.pi / 2) / r;
+    _lon -= details.delta.dx * k;
+    _lat += details.delta.dy * k;
+    // 纬度卡在 ±85°，避免翻到北极点后整个球上下颠倒
+    const cap = 85 * math.pi / 180;
+    if (_lat > cap) _lat = cap;
+    if (_lat < -cap) _lat = -cap;
+    setState(() {});
+  }
+
+  void _onPanEnd(DragEndDetails _) {
+    _dragging = false;
+    // 结束时把 tween 起止都对齐到当前位置 —— 避免下一帧被 tween 残留拉回
+    _fromLat = _toLat = _lat;
+    _fromLon = _toLon = _lon;
+    _tweenStart = _now;
   }
 
   // ─── build ─────────────────────────────────────────
@@ -150,18 +191,27 @@ class _InterferenceGlobeState extends State<InterferenceGlobe>
         widget.focal!.lon != null;
     return SizedBox.square(
       dimension: widget.size,
-      child: CustomPaint(
-        painter: _GlobePainter(
-          lat: _lat,
-          lon: _lon,
-          activity: widget.activity.clamp(0.0, 1.0),
-          pulsePhase: _pulsePhase,
-          rippleAges: _ripples
-              .map((r) => (_now - r).inMicroseconds / 1e6)
-              .toList(growable: false),
-          primary: widget.primary,
-          secondary: widget.secondary,
-          hasFocal: hasFocal,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onPanStart: _onPanStart,
+        onPanUpdate: _onPanUpdate,
+        onPanEnd: _onPanEnd,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.grab,
+          child: CustomPaint(
+            painter: _GlobePainter(
+              lat: _lat,
+              lon: _lon,
+              activity: widget.activity.clamp(0.0, 1.0),
+              pulsePhase: _pulsePhase,
+              rippleAges: _ripples
+                  .map((r) => (_now - r).inMicroseconds / 1e6)
+                  .toList(growable: false),
+              primary: widget.primary,
+              secondary: widget.secondary,
+              hasFocal: hasFocal && !_dragging,
+            ),
+          ),
         ),
       ),
     );

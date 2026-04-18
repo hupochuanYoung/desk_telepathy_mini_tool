@@ -37,12 +37,15 @@ class TelepathyMessage {
       final map = jsonDecode(raw) as Map<String, dynamic>;
       return TelepathyMessage(
         type: MsgType.values.firstWhere((e) => e.name == map['t']),
-        data: map['d'] as String,
+        data: (map['d'] ?? '').toString(),
         from: map['f'] as String? ?? '',
-        timestamp: DateTime.fromMillisecondsSinceEpoch(map['ts'] as int),
+        timestamp: DateTime.fromMillisecondsSinceEpoch(
+          (map['ts'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch,
+        ),
       );
     } catch (_) {
-      return TelepathyMessage(type: MsgType.action, data: raw);
+      // 非当前协议格式（脏 retained / 旧版本残留）直接忽略，避免污染事件流。
+      return null;
     }
   }
 
@@ -130,23 +133,31 @@ class MqttService {
         _setConnected(true);
         client.subscribe(topic, MqttQos.atMostOnce);
 
-        client.updates!.listen((List<MqttReceivedMessage<MqttMessage>> c) {
-          final recMess = c[0].payload as MqttPublishMessage;
-          final payload = MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
-          final msg = TelepathyMessage.decode(payload);
-          if (msg == null) return;
-          // 过滤掉自己设备发的消息（retained 的 LWT 也会被过滤）
-          if (msg.from == _deviceId) return;
-          AppLogger.d(_tag, '收到 ${msg.from}: ${msg.type.name}=${msg.data}');
+        client.updates!.listen((List<MqttReceivedMessage<MqttMessage>> batch) {
+          // 同一次 updates 可能携带多条消息；必须逐条处理，不能只取第一条。
+          for (final entry in batch) {
+            final recMess = entry.payload as MqttPublishMessage;
+            final payload = MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
+            final msg = TelepathyMessage.decode(payload);
+            if (msg == null) {
+              AppLogger.w(_tag, '忽略非协议消息: $payload');
+              continue;
+            }
+            // 过滤掉自己设备发的消息（retained 的 LWT 也会被过滤）
+            if (msg.from == _deviceId) continue;
+            AppLogger.d(_tag, '收到 ${msg.from}: ${msg.type.name}=${msg.data}');
 
-          // 收到对端的 hello：立刻回传自己最新的 status + location，帮助对端脱离未知态
-          if (msg.type == MsgType.hello) {
-            sendStatus(_myStatus);
-            final loc = _myLocation;
-            if (loc != null) send(TelepathyMessage(type: MsgType.location, data: loc), retain: true);
+            // 收到对端的 hello：立刻回传自己最新的 status + location，帮助对端脱离未知态
+            if (msg.type == MsgType.hello) {
+              sendStatus(_myStatus);
+              final loc = _myLocation;
+              if (loc != null) {
+                send(TelepathyMessage(type: MsgType.location, data: loc), retain: true);
+              }
+            }
+
+            _msgController.add(msg);
           }
-
-          _msgController.add(msg);
         });
 
         _onLinkUp();

@@ -43,6 +43,7 @@ dependencies:
   http: ^1.5.0
   flutter_dotenv: ^6.0.0
   rive: ^0.14.0-dev.6 # or latest dev version
+  provider: ^6.1.5+1
 
 dev_dependencies:
   flutter_test:

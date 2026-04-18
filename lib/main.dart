@@ -2,8 +2,10 @@ import 'package:desk_telepathy/src/core/config/env.dart';
 import 'package:desk_telepathy/src/core/config/window_size.dart';
 import 'package:desk_telepathy/src/core/utils/platform_utils.dart';
 import 'package:desk_telepathy/src/core/utils/window_helper.dart';
+import 'package:desk_telepathy/src/feature/home/presentation/provider/home_provider.dart';
 import 'package:desk_telepathy/src/feature/home/presentation/screen/home_screen.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 void main() async {
@@ -39,16 +41,19 @@ class DeskTelepathyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: '',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.pinkAccent,
-          brightness: Brightness.dark,
+    return ChangeNotifierProvider(
+      create: (_) => HomeProvider()..init(),
+      child: MaterialApp(
+        title: '',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: Colors.pinkAccent,
+            brightness: Brightness.dark,
+          ),
         ),
+        home: const HomeScreen(),
       ),
-      home: const HomeScreen(),
     );
   }
 }
