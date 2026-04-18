@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -217,22 +218,18 @@ class HomeProvider extends ChangeNotifier {
       case MsgType.hello:
         final wasOffline = _peerStatus == PeerStatus.offline;
         AppLogger.d(_presenceTag, '收到 hello: ${msg.data}');
+        final helloLoc = _decodeHelloLocation(msg.data);
+        if (helloLoc != null) {
+          _peerLocation = helloLoc;
+          _peerLocationTimer?.cancel();
+          AppLogger.i('Location', '从 hello 同步到对方位置: ${helloLoc.display}');
+        }
         if (wasOffline) {
           _peerStatus = PeerStatus.online;
           _onPeerStatusChanged(wasOffline: true, next: PeerStatus.online);
           _safeNotify();
-        }
-        // 对方 hello 后立即回传自己的当前状态 + 位置（不发花，避免互相连锁刷屏）
-        _replyMyPresence();
-      case MsgType.location:
-        final loc = LocationInfo.decode(msg.data);
-        if (loc != null) {
-          _peerLocation = loc;
-          _peerLocationTimer?.cancel();
-          AppLogger.i('Location', '收到对方位置: ${loc.display}');
-          _safeNotify();
-        } else {
-          AppLogger.w('Location', '收到 location 但解析失败: ${msg.data}');
+          // 仅在对方首次上线时回一次，避免 hello 循环回声
+          _replyMyPresence();
         }
       case MsgType.vase:
         break;
@@ -264,29 +261,54 @@ class HomeProvider extends ChangeNotifier {
   /// 本端连上 MQTT（首次 / 自动重连）后的固定握手：
   /// - 发 hello
   /// - 发自己当前 status
-  /// - 发自己位置（若已拿到）
+  /// - hello.data 里携带自己位置（若已拿到）
   /// - 主动送一朵雏菊（即使对方当下不在线，broker 也会正常处理当前消息）
   void _sendHelloFlowOnConnect() {
     if (!_connected) return;
-    _mqtt.send(TelepathyMessage(type: MsgType.hello, data: 'hi'));
+    _mqtt.send(TelepathyMessage(type: MsgType.hello, data: _buildHelloPayload()));
     _mqtt.sendStatus(_myStatus.name);
-    final mine = _myLocation;
-    if (mine != null) _mqtt.sendLocation(mine.encode());
     _mqtt.sendAction(TelepathyAction.daisy.code);
     _store.recordSent(TelepathyAction.daisy.code);
     _markSelfSend(TelepathyAction.daisy.code);
   }
 
-  /// 响应对方 hello：回传我当前状态和位置，不发 action，避免双端回声升级。
+  /// 响应对方 hello：回传我当前状态 + hello(含地址)。
+  /// 仅在对方从离线切到在线时触发一次，避免 hello 循环。
   void _replyMyPresence() {
     if (!_connected) return;
     _mqtt.sendStatus(_myStatus.name);
+    _mqtt.send(TelepathyMessage(type: MsgType.hello, data: _buildHelloPayload()));
+  }
+
+  /// hello 里直接携带地址信息，便于对端一跳拿到位置；
+  /// 若本端尚未定位成功，则回退到简单文本。
+  ///
+  /// 注意：部分链路对非 ASCII 内容（中文）处理不稳定，
+  /// 这里用 base64 包一层，确保 MQTT payload 始终是 ASCII。
+  String _buildHelloPayload() {
     final mine = _myLocation;
-    if (mine != null) {
-      _mqtt.sendLocation(mine.encode());
-    } else {
-      AppLogger.w('Location', '回复 hello 时本端位置为空，稍后拿到位置会自动补发');
+    if (mine == null) return 'hi';
+    final raw = mine.encode();
+    final b64 = base64Url.encode(utf8.encode(raw));
+    return 'b64:$b64';
+  }
+
+  /// 兼容三种 hello 格式：
+  /// 1) `b64:<base64url(json)>`
+  /// 2) 直接 JSON 字符串（老格式）
+  /// 3) 其他普通文本（如 hi）=> null
+  LocationInfo? _decodeHelloLocation(String data) {
+    if (data.startsWith('b64:')) {
+      final body = data.substring(4);
+      try {
+        final raw = utf8.decode(base64Url.decode(body));
+        return LocationInfo.decode(raw);
+      } catch (_) {
+        AppLogger.w('Location', 'hello(base64) 解码失败: $data');
+        return null;
+      }
     }
+    return LocationInfo.decode(data);
   }
 
   /// 对方从离线切到在线时，仅做 UI 提示，不再承担网络握手职责。

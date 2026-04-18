@@ -12,12 +12,11 @@ const _tag = 'MQTT';
 /// - [action]   一次性丢花互动（tulip / daisy / lily / rose / sunflower）
 /// - [status]   我的在线状态（online / busy / focus / offline），**retained**
 /// - [ambient]  氛围同步
-/// - [hello]    上线通知，对端收到后应回传自己的 status / location
-/// - [location] 地理位置（城市级 JSON），**retained**
+/// - [hello]    上线通知，对端收到后应回传自己的 status；并在 data 中携带地址 JSON
 /// - [vase]     共享花瓶事件（追加 / 全量快照）。data 是一段 JSON：
 ///              `{"op":"add","item":{...}}` 非 retained，广播一次；
 ///              `{"op":"snap","items":[...]}` **retained**，晚上线方用它初始化。
-enum MsgType { action, status, ambient, hello, location, vase }
+enum MsgType { action, status, ambient, hello, vase }
 
 /// MQTT 消息体
 class TelepathyMessage {
@@ -173,14 +172,6 @@ class MqttService {
   );
 
   void sendAmbient(String ambient) => send(TelepathyMessage(type: MsgType.ambient, data: ambient));
-
-  /// 地理位置用 retained 发布：晚上线的对端订阅后也能立刻看到。
-  /// 传空串等价于清空（下次订阅者不会拿到历史位置）。
-  void sendLocation(String json) => send(
-    TelepathyMessage(type: MsgType.location, data: json),
-    retain: true,
-    qos: MqttQos.atLeastOnce,
-  );
 
   /// 花瓶：追加一个物品（非 retained，一次性广播）。
   /// 调用前通常已在本地 state 里加入并重新发了一次 [sendVaseSnapshot]。
